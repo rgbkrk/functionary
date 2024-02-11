@@ -4,12 +4,15 @@
 import asyncio
 import json
 import random
-from typing import List
+from contextlib import asynccontextmanager
+from functools import lru_cache
+from typing import List, Optional
 
 from chatlab import FunctionRegistry, tool_result
+from fastapi import Depends, FastAPI, HTTPException
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
-from pydantic import Field
+from pydantic import BaseModel, Field
 from termcolor import colored
 from transformers import AutoTokenizer
 
@@ -81,7 +84,8 @@ class FunctionaryAPI:
         return response
 
 
-async def main():
+
+async def main_direct_demo():
     import sys
 
     # Check for command line arguments for model size
@@ -166,6 +170,51 @@ async def main():
         )
         messages.append(response)
 
+class ChatRequest(BaseModel):
+    messages: List[dict]
+    tools: Optional[List[dict]] = None
+
+
+functionary_api_instance = None
+
+@asynccontextmanager
+async def app_lifespan(app):
+    global functionary_api_instance
+    functionary_api_instance = FunctionaryAPI()
+    yield
+
+app = FastAPI(lifespan=app_lifespan)
+
+def get_functionary_api():
+    if functionary_api_instance is None:
+        raise HTTPException(status_code=500, detail="Model is not loaded.")
+    return functionary_api_instance
+
+
+@app.post("/v1/chat/completions")
+async def chat_completion(request: ChatRequest, functionary: FunctionaryAPI = Depends(get_functionary_api)):
+    try:
+        message = await functionary.create(messages=request.messages, tools=request.tools)
+
+        has_tool_calls = message['tool_calls'] is not None and len(message['tool_calls']) > 0
+
+        finish_reason = "completed"
+
+        if has_tool_calls:
+            finish_reason = "tool_calls"
+        else:
+            finish_reason = "completed"
+
+        return {"choices": [{
+            "finish_reason": finish_reason,
+            "message": message
+        }]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def main():
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
